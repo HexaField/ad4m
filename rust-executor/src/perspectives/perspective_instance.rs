@@ -5627,39 +5627,14 @@ GROUP BY source
     async fn test_literal_parsing_in_surreal_queries() {
         let mut perspective = setup().await;
 
-        println!("\n=== Testing fn::parse_literal() in SurrealDB ===");
+        println!("\n=== Testing fn::parse_literal() in SurrealDB (pure SurrealQL) ===");
 
-        // Helper function to URL encode for literal URLs
-        fn url_encode(s: &str) -> String {
-            s.chars()
-                .map(|c| match c {
-                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-                    _ => format!("%{:02X}", c as u8),
-                })
-                .collect()
-        }
-
-        // Create literal://json: URLs with Expression objects (as created by the literal language)
-        let recipe1_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pasta Carbonara","proof":{"signature":"abc123"}}"#;
-        let recipe1_name_literal = format!("literal://json:{}", url_encode(recipe1_json));
-
-        let recipe2_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pizza Margherita","proof":{"signature":"def456"}}"#;
-        let recipe2_name_literal = format!("literal://json:{}", url_encode(recipe2_json));
-
-        let recipe3_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Salad","proof":{"signature":"ghi789"}}"#;
-        let recipe3_name_literal = format!("literal://json:{}", url_encode(recipe3_json));
-
-        println!("Created literal URLs:");
-        println!("  Recipe1: {}", recipe1_name_literal);
-        println!("  Recipe2: {}", recipe2_name_literal);
-        println!("  Recipe3: {}", recipe3_name_literal);
-
-        // Add links with literal URLs as targets
+        // Add links with literal:// URLs as targets (string, number, boolean types)
         perspective
             .add_link(
                 Link {
-                    source: "literal://recipe1".to_string(),
-                    target: recipe1_name_literal.clone(),
+                    source: "item://1".to_string(),
+                    target: "literal://string:Pasta%20Carbonara".to_string(),
                     predicate: Some("recipe://name".to_string()),
                 },
                 LinkStatus::Shared,
@@ -5672,8 +5647,8 @@ GROUP BY source
         perspective
             .add_link(
                 Link {
-                    source: "literal://recipe2".to_string(),
-                    target: recipe2_name_literal.clone(),
+                    source: "item://2".to_string(),
+                    target: "literal://string:Pizza%20Margherita".to_string(),
                     predicate: Some("recipe://name".to_string()),
                 },
                 LinkStatus::Shared,
@@ -5686,8 +5661,8 @@ GROUP BY source
         perspective
             .add_link(
                 Link {
-                    source: "literal://recipe3".to_string(),
-                    target: recipe3_name_literal.clone(),
+                    source: "item://3".to_string(),
+                    target: "literal://string:Salad".to_string(),
                     predicate: Some("recipe://name".to_string()),
                 },
                 LinkStatus::Shared,
@@ -5697,184 +5672,146 @@ GROUP BY source
             .await
             .unwrap();
 
-        println!("✓ Added 3 recipe links with literal URLs");
+        perspective
+            .add_link(
+                Link {
+                    source: "item://1".to_string(),
+                    target: "literal://number:30".to_string(),
+                    predicate: Some("recipe://cook_time".to_string()),
+                },
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
 
-        // Give SurrealDB time to process
+        perspective
+            .add_link(
+                Link {
+                    source: "item://1".to_string(),
+                    target: "literal://boolean:true".to_string(),
+                    predicate: Some("recipe://vegetarian".to_string()),
+                },
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        println!("✓ Added links with string, number, and boolean literal URLs");
+
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Test 1: Query without fn::parse_literal() - should match the full literal URL
-        println!("\n=== Test 1: Query without fn::parse_literal() ===");
-        let query_raw = format!(
-            "SELECT source, target FROM link WHERE predicate = 'recipe://name' AND target = '{}'",
-            recipe1_name_literal
-        );
-        println!("Query: {}", query_raw);
-        let results_raw = perspective.surreal_query(query_raw).await.unwrap();
-        println!("Results: {} matches", results_raw.len());
-        assert_eq!(
-            results_raw.len(),
-            1,
-            "Should find exactly 1 match with full literal URL"
-        );
-
-        // Test 2A: Test if JavaScript functions work at all
-        println!("\n=== Test 2A: Test if JavaScript works with simple function ===");
-        let query_simple_js = "RETURN function() { return 42; }";
-        println!("Query: {}", query_simple_js);
-        let result_simple_js = perspective
-            .surreal_query(query_simple_js.to_string())
+        // Test 1: Direct fn::parse_literal() on a string literal
+        println!("\n=== Test 1: Parse string literal directly ===");
+        let result = perspective
+            .surreal_query("RETURN fn::parse_literal('literal://string:Hello%20World')".to_string())
             .await
             .unwrap();
-        println!("Result: {:?}", result_simple_js);
+        println!("Result: {:?}", result);
 
-        // Test 2B: Test a debug function that returns arguments
-        println!("\n=== Test 2B: Test what arguments contains ===");
-        let query_debug = "RETURN function() { return arguments.length; }";
-        println!("Query: {}", query_debug);
-        let result_debug = perspective
-            .surreal_query(query_debug.to_string())
+        // Test 2: Query and parse string literals from links
+        println!("\n=== Test 2: Parse string literals from link targets ===");
+        let results = perspective
+            .surreal_query(
+                "SELECT source, fn::parse_literal(target) AS parsed_name FROM link WHERE predicate = 'recipe://name'"
+                    .to_string(),
+            )
             .await
             .unwrap();
-        println!("Arguments length: {:?}", result_debug);
+        println!("Results: {} links", results.len());
+        assert_eq!(results.len(), 3, "Should find 3 recipe name links");
 
-        // Test 2C: Test fn::parse_literal() directly
-        println!("\n=== Test 2C: Test fn::parse_literal() directly ===");
-        let test_simple_literal = "literal://string:Hello%20World";
-        let query_test_fn = format!("RETURN fn::parse_literal('{}')", test_simple_literal);
-        println!("Query: {}", query_test_fn);
-        let result_test_fn = perspective.surreal_query(query_test_fn).await.unwrap();
-        println!("Result: {:?}", result_test_fn);
-
-        // Test 3: Now check what fn::parse_literal() returns for our data
-        println!("\n=== Test 3: Check what fn::parse_literal() returns on link targets ===");
-        let query_check = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name'",
-        );
-        println!("Query:\n{}", query_check);
-        let results_check = perspective.surreal_query(query_check).await.unwrap();
-        println!("Results: {} links", results_check.len());
-
-        for result in &results_check {
-            let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let target = result.get("target").and_then(|v| v.as_str()).unwrap_or("?");
-            let parsed = result.get("parsed_data");
-            println!("  Source: {}", source);
-            println!("  Target: {}...", &target[..60.min(target.len())]);
-            println!("  Parsed: {:?}", parsed);
-        }
-
-        // Test 4: Try to match using parsed value
-        println!("\n=== Test 4: Query with fn::parse_literal() to match data value ===");
-        let query_parsed = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) = 'Pasta Carbonara'",
-        );
-        println!("Query:\n{}", query_parsed);
-        let results_parsed = perspective.surreal_query(query_parsed).await.unwrap();
-        println!("Results: {} matches", results_parsed.len());
-
-        if results_parsed.len() == 0 {
-            println!("WARNING: fn::parse_literal() returned 0 results - function may not be working correctly");
-            println!("This could be due to:");
-            println!("  1. JavaScript functions not enabled (need --allow-scripting flag)");
-            println!("  2. Function definition syntax error");
-            println!("  3. Closure not capturing $url parameter correctly");
-        }
-
-        assert_ne!(
-            results_parsed.len(),
-            0,
-            "fn::parse_literal() should return results for matching data"
-        );
-
+        // Test 3: Filter by parsed value
+        println!("\n=== Test 3: WHERE clause with fn::parse_literal() ===");
+        let results = perspective
+            .surreal_query(
+                "SELECT source, fn::parse_literal(target) AS parsed_name FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) = 'Pasta Carbonara'"
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "Should find exactly 1 match");
+        let source = results[0].get("source").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(source, "item://1", "Should find item://1");
+        let parsed = results[0]
+            .get("parsed_name")
+            .and_then(|v| v.as_str())
+            .unwrap();
         assert_eq!(
-            results_parsed.len(),
-            1,
-            "Should find exactly 1 match using fn::parse_literal()"
+            parsed, "Pasta Carbonara",
+            "Should decode URL-encoded string"
         );
 
-        let result = &results_parsed[0];
-        let source = result.get("source").and_then(|v| v.as_str()).unwrap();
-        let parsed_data = result.get("parsed_data").and_then(|v| v.as_str()).unwrap();
-
-        println!("  Source: {}", source);
-        println!("  Parsed data: {}", parsed_data);
-
-        assert_eq!(source, "literal://recipe1", "Should find recipe1");
+        // Test 4: IN clause with parsed values
+        println!("\n=== Test 4: IN clause with fn::parse_literal() ===");
+        let results = perspective
+            .surreal_query(
+                "SELECT source, fn::parse_literal(target) AS parsed_name FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) IN ['Pasta Carbonara', 'Pizza Margherita']"
+                    .to_string(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            parsed_data, "Pasta Carbonara",
-            "Should extract 'data' field from JSON"
-        );
-
-        // Test 5: Query multiple values with fn::parse_literal()
-        println!("\n=== Test 5: Query with IN clause using fn::parse_literal() ===");
-        let query_multiple = format!(
-            "SELECT source, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) IN ['Pasta Carbonara', 'Pizza Margherita']",
-        );
-        println!("Query:\n{}", query_multiple);
-        let results_multiple = perspective.surreal_query(query_multiple).await.unwrap();
-        println!("Results: {} matches", results_multiple.len());
-
-        assert_eq!(
-            results_multiple.len(),
+            results.len(),
             2,
             "Should find exactly 2 matches with IN clause"
         );
 
-        let names: Vec<String> = results_multiple
+        let names: Vec<String> = results
             .iter()
             .filter_map(|r| {
-                r.get("parsed_data")
+                r.get("parsed_name")
                     .and_then(|v| v.as_str())
                     .map(String::from)
             })
             .collect();
+        assert!(names.contains(&"Pasta Carbonara".to_string()));
+        assert!(names.contains(&"Pizza Margherita".to_string()));
+        assert!(!names.contains(&"Salad".to_string()));
 
-        println!("  Found names: {:?}", names);
-        assert!(
-            names.contains(&"Pasta Carbonara".to_string()),
-            "Should find Pasta Carbonara"
-        );
-        assert!(
-            names.contains(&"Pizza Margherita".to_string()),
-            "Should find Pizza Margherita"
-        );
-        assert!(
-            !names.contains(&"Salad".to_string()),
-            "Should not find Salad"
-        );
+        // Test 5: Parse number literal
+        println!("\n=== Test 5: Parse number literal ===");
+        let results = perspective
+            .surreal_query(
+                "SELECT fn::parse_literal(target) AS cook_time FROM link WHERE source = 'item://1' AND predicate = 'recipe://cook_time'"
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "Should find cook_time link");
+        let cook_time = results[0]
+            .get("cook_time")
+            .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)));
+        assert_eq!(cook_time, Some(30), "Should parse number literal");
 
-        // Test 6: GROUP BY with fn::parse_literal() - this should fail as SurrealDB doesn't support it
-        println!("\n=== Test 6: GROUP BY with fn::parse_literal() ===");
-        let query_group = format!(
-            "SELECT fn::parse_literal(target), array::group(source) AS sources FROM link WHERE predicate = 'recipe://name' GROUP BY fn::parse_literal(target)",
-        );
-        println!("Query:\n{}", query_group);
-        let result_group = perspective.surreal_query(query_group).await;
+        // Test 6: Parse boolean literal
+        println!("\n=== Test 6: Parse boolean literal ===");
+        let results = perspective
+            .surreal_query(
+                "SELECT fn::parse_literal(target) AS vegetarian FROM link WHERE source = 'item://1' AND predicate = 'recipe://vegetarian'"
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "Should find vegetarian link");
+        let vegetarian = results[0].get("vegetarian").and_then(|v| v.as_bool());
+        assert_eq!(vegetarian, Some(true), "Should parse boolean literal");
 
-        // This should fail - SurrealDB doesn't support grouping by function results
-        if result_group.is_err() {
-            println!("  ✓ Query failed as expected - SurrealDB doesn't support GROUP BY fn::function_call()");
-            println!("  Error: {}", result_group.unwrap_err());
-        } else {
-            println!(
-                "  WARNING: Query succeeded unexpectedly! SurrealDB may have added this feature."
-            );
-            let results_group = result_group.unwrap();
-            println!("  Results: {} groups", results_group.len());
-            for group in &results_group {
-                println!(
-                    "  Group object keys: {:?}",
-                    group.as_object().map(|o| o.keys().collect::<Vec<_>>())
-                );
-            }
-        }
+        // Test 7: Non-literal URL passes through unchanged
+        println!("\n=== Test 7: Non-literal URL passthrough ===");
+        let results = perspective
+            .surreal_query("RETURN fn::parse_literal('https://example.com')".to_string())
+            .await
+            .unwrap();
+        println!("Passthrough result: {:?}", results);
 
         println!("\n=== ✓ SUCCESS ===");
-        println!("✓ fn::parse_literal() correctly parses literal://json: URLs");
-        println!("✓ Extracted 'data' field from Expression objects");
-        println!("✓ WHERE clauses work with parsed values");
-        println!("✓ IN clauses work with parsed values");
-        println!("Note: GROUP BY fn::function_call() not supported in SurrealDB 2.1");
+        println!("✓ fn::parse_literal() correctly parses string, number, boolean literals");
+        println!("✓ URL-encoded strings are decoded");
+        println!("✓ WHERE and IN clauses work with parsed values");
     }
 
     #[tokio::test]
@@ -7141,11 +7078,12 @@ GROUP BY source
 
         // Add a link pointing to a JSON literal (URL encoded)
         let encoded_json = "%7B%22name%22%3A%22Alice%22%2C%22age%22%3A30%7D"; // {"name":"Alice","age":30}
+        let json_literal = format!("literal://json:{}", encoded_json);
         perspective
             .add_link(
                 Link {
                     source: "user://789".to_string(),
-                    target: format!("literal://json:{}", encoded_json),
+                    target: json_literal.clone(),
                     predicate: Some("ad4m://has_profile".to_string()),
                 },
                 LinkStatus::Shared,
@@ -7157,7 +7095,8 @@ GROUP BY source
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Test: Parse JSON literal (should extract .data field)
+        // Test: fn::parse_literal returns json: literals as-is (JSON parsing removed;
+        // it required the `scripting` feature's embedded JS engine for JSON.parse).
         let result = perspective
             .surreal_query(
                 "SELECT fn::parse_literal(out.uri) AS profile FROM link WHERE in.uri = 'user://789' AND predicate = 'ad4m://has_profile'"
@@ -7167,9 +7106,15 @@ GROUP BY source
             .unwrap();
 
         assert_eq!(result.len(), 1, "Should find 1 result");
-        // fn::parse_literal should extract the data from JSON expressions
-        let profile = result[0].get("profile");
-        assert!(profile.is_some(), "Should have parsed JSON literal");
+        // json: literals pass through as the raw literal:// URL since JSON parsing
+        // is not available in pure SurrealQL
+        let profile = result[0].get("profile").and_then(|v| v.as_str());
+        assert!(profile.is_some(), "Should have profile field");
+        assert_eq!(
+            profile.unwrap(),
+            json_literal,
+            "json: literals should pass through as raw URL without scripting feature"
+        );
     }
 
     #[tokio::test]

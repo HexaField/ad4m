@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::{
     engine::local::{Db, RocksDb},
-    opt::{capabilities::Capabilities, Config},
+    opt::Config,
     Surreal, Value as SurrealValue,
 };
 
@@ -313,8 +313,7 @@ impl SurrealDBService {
         database: &str,
         data_path: Option<&str>,
     ) -> Result<Self, Error> {
-        // Enable scripting (and any other capabilities you want)
-        let config = Config::default().capabilities(Capabilities::default().with_scripting(true));
+        let config = Config::default();
 
         // Initialize file-based SurrealDB instance with RocksDB
         // Each perspective gets its own separate database file for isolation
@@ -324,7 +323,7 @@ impl SurrealDBService {
                 std::path::Path::new(path).join(format!("surrealdb_perspectives/{}", database));
             std::fs::create_dir_all(&db_path)?;
 
-            // Try to create RocksDB with config (scripting enabled)
+            // Try to create RocksDB with config
             // If we get a lock error, wait briefly and retry (in case previous instance is being cleaned up)
             let mut retries = 0;
             let max_retries = 3;
@@ -402,117 +401,75 @@ impl SurrealDBService {
             -- This prevents race conditions during concurrent link creation
             DEFINE INDEX IF NOT EXISTS link_unique_idx ON link FIELDS in, out, predicate, author, timestamp UNIQUE;
 
+            -- Pure SurrealQL helper: basic percent-decoding of common URL-encoded characters
+            DEFINE FUNCTION IF NOT EXISTS fn::url_decode($str: option<string>) {
+                IF $str IS NONE { RETURN NONE; };
+                LET $r = string::replace($str, '%20', ' ');
+                LET $r = string::replace($r, '%21', '!');
+                LET $r = string::replace($r, '%22', '\"');
+                LET $r = string::replace($r, '%23', '#');
+                LET $r = string::replace($r, '%24', '$');
+                LET $r = string::replace($r, '%26', '&');
+                LET $r = string::replace($r, '%27', \"'\");
+                LET $r = string::replace($r, '%28', '(');
+                LET $r = string::replace($r, '%29', ')');
+                LET $r = string::replace($r, '%2B', '+');
+                LET $r = string::replace($r, '%2C', ',');
+                LET $r = string::replace($r, '%2F', '/');
+                LET $r = string::replace($r, '%3A', ':');
+                LET $r = string::replace($r, '%3B', ';');
+                LET $r = string::replace($r, '%3D', '=');
+                LET $r = string::replace($r, '%3F', '?');
+                LET $r = string::replace($r, '%40', '@');
+                LET $r = string::replace($r, '%5B', '[');
+                LET $r = string::replace($r, '%5D', ']');
+                LET $r = string::replace($r, '%7B', '{');
+                LET $r = string::replace($r, '%7D', '}');
+                -- Decode %25 (literal percent) last to avoid double-decoding
+                LET $r = string::replace($r, '%25', '%');
+                RETURN $r;
+            };
+
+            -- Parse literal:// URLs into native SurrealQL values.
+            -- Supports string:, number:, and boolean: prefixes.
+            -- Note: literal://json: support was removed — it required an embedded JS engine
+            -- (QuickJS via SurrealDB's `scripting` feature) for decodeURIComponent + JSON.parse.
+            -- No production queries call this function; json: literals can be pre-processed
+            -- on the Rust side before insertion if needed in the future.
             DEFINE FUNCTION IF NOT EXISTS fn::parse_literal($url: option<string>) {
-                RETURN function($url) {
-                    const [url] = arguments;
-                    
-                    if (!url || typeof url !== 'string') {
-                        return url;
-                    }
-                    
-                    if (!url.startsWith('literal://')) {
-                        return url;
-                    }
-                    
-                    const body = url.substring(10);
-                    
-                    if (body.startsWith('string:')) {
-                        return decodeURIComponent(body.substring(7));
-                    }
-                    
-                    if (body.startsWith('number:')) {
-                        return parseFloat(body.substring(7));
-                    }
-                    
-                    if (body.startsWith('boolean:')) {
-                        return body.substring(8) === 'true';
-                    }
-                    
-                    if (body.startsWith('json:')) {
-                        try {
-                            const json = decodeURIComponent(body.substring(5));
-                            const parsed = JSON.parse(json);
-                            if (parsed.data !== undefined) {
-                                return parsed.data;
-                            }
-                            return parsed;
-                        } catch (e) {
-                            return url;
-                        }
-                    }
-                    
-                    return url;
+                IF $url IS NONE { RETURN NONE; };
+                IF !string::starts_with($url, 'literal://') { RETURN $url; };
+                LET $body = string::slice($url, 10);
+                IF string::starts_with($body, 'string:') {
+                    RETURN fn::url_decode(string::slice($body, 7));
                 };
+                IF string::starts_with($body, 'number:') {
+                    RETURN type::number(string::slice($body, 7));
+                };
+                IF string::starts_with($body, 'boolean:') {
+                    RETURN string::slice($body, 8) = 'true';
+                };
+                RETURN $url;
             };
 
-            DEFINE FUNCTION IF NOT EXISTS fn::strip_html($html: option<string>) {
-                RETURN function($html) {
-                    const [html] = arguments;
+            -- fn::strip_html was removed: regex-based tag stripping (/<[^>]*>/g) cannot be
+            -- replicated in pure SurrealQL (no regex replace). No production queries call it.
+            -- If needed, pre-process HTML stripping on the Rust side before insertion.
 
-                    if (!html || typeof html !== 'string') {
-                        return html;
-                    }
+            -- fn::json_path was removed: dynamic dot-path object traversal requires runtime
+            -- string splitting and property access not available in pure SurrealQL.
+            -- No production queries call it. Use native SurrealQL field access (obj.field) instead.
 
-                    // Remove HTML tags using regex
-                    return html.replace(/<[^>]*>/g, '');
-                };
-            };
-
-            DEFINE FUNCTION IF NOT EXISTS fn::json_path($obj: option<record>, $path: option<string>) {
-                RETURN function($obj, $path) {
-                    const [obj, path] = arguments;
-
-                    if (!obj || !path || typeof path !== 'string') {
-                        return null;
-                    }
-
-                    // Split path by dots and traverse object
-                    const parts = path.split('.');
-                    let current = obj;
-
-                    for (const part of parts) {
-                        if (current && typeof current === 'object' && part in current) {
-                            current = current[part];
-                        } else {
-                            return null;
-                        }
-                    }
-
-                    return current;
-                };
-            };
-
+            -- String containment check — thin wrapper around native string::contains
             DEFINE FUNCTION IF NOT EXISTS fn::contains($str: option<string>, $substring: option<string>) {
-                RETURN function($str, $substring) {
-                    const [str, substring] = arguments;
-                    //console.log('🔍 fn::contains input - str:', str, 'substring:', substring);
-
-                    if (!str || !substring || typeof str !== 'string' || typeof substring !== 'string') {
-                        //console.log('🔍 fn::contains: invalid types, returning false');
-                        return false;
-                    }
-
-                    const result = str.includes(substring);
-                    //console.log('🔍 fn::contains result:', result);
-                    return result;
-                };
+                IF $str IS NONE OR $substring IS NONE { RETURN false; };
+                RETURN string::contains($str, $substring);
             };
 
+            -- Regex match — thin wrapper around native string::matches
             DEFINE FUNCTION IF NOT EXISTS fn::regex_match($str: option<string>, $pattern: option<string>) {
-                RETURN function($str, $pattern) {
-                    const [str, pattern] = arguments;
-
-                    if (!str || !pattern || typeof str !== 'string' || typeof pattern !== 'string') {
-                        return false;
-                    }
-
-                    try {
-                        const regex = new RegExp(pattern);
-                        return regex.test(str);
-                    } catch (e) {
-                        return false;
-                    }
-                };
+                IF $str IS NONE OR $pattern IS NONE { RETURN false; };
+                RETURN string::matches($str, $pattern);
             };
             ",
         )
