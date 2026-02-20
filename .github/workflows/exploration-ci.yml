@@ -1,0 +1,31 @@
+name: Exploration CI
+
+on:
+  push:
+    branches:
+      - feat/wasm-language-runtime
+      - feat/sqlite-link-storage
+      - fix/remove-surrealdb-scripting
+  pull_request:
+    branches: [dev]
+
+jobs:
+  cargo-check:
+    name: Cargo Check
+    runs-on: ubuntu-22.04
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-executor
+          cache-on-failure: true
+      - name: Cargo check
+        run: cd rust-executor && cargo check 2>&1
+      - name: Cargo test (surreal_service)
+        run: cd rust-executor && cargo test surreal_service -- --nocapture 2>&1
+      - name: Cargo test (perspective parse_literal)
+        run: cd rust-executor && cargo test test_literal_parsing test_docs_parse_literal -- --nocapture 2>&1
